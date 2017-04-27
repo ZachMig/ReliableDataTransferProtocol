@@ -24,6 +24,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.BitSet;
 
@@ -127,26 +128,12 @@ public class fcntcp {
 					
 					window.incSeq(segment.length);
 					window.incNumUnacked((short) segment.length);
+					window.addPacketInFlight(window.getSeq()+segment.length);
 
 				} else {
 					window.wait();
 					
 					//Start thread-shared timeout here?
-					
-					//Adjust CWND, recvThread takes care of RWND
-					if (window.inSlowStart()) {
-						//SS Mode
-						if ((window.getCwnd() * 2) < 32736) 
-							window.setCwnd((short) (window.getCwnd() * 2));						
-						else 
-							window.setCwnd((short) 32736);
-					} else {
-						//CA Mode
-						if ((window.getCwnd() + size) < 32736)
-							window.setCwnd((short) (window.getCwnd() + size));
-						else 
-							window.setCwnd((short) 32736);
-					}
 				}
 			}
 			
@@ -191,9 +178,38 @@ public class fcntcp {
 		
 		public void run() {
 			System.out.println("starting ClientReceiveThread");
+			
+			for (;;) {
+				if (window.allPacketsAcked())
+					break;
+				
+				packet = new DatagramPacket(new byte[20], 20);
+				try {socket.receive(packet);}
+				catch (IOException e) { e.printStackTrace();}
+				
+				Header header = new Header(ByteBuffer.wrap(packet.getData()));
+				window.removePacketInFlight(header.getAckNum());
+				//do something else probably
+			}
+			
+			//Adjust CWND
+			if (window.inSlowStart()) {
+				//SS Mode
+				if ((window.getCwnd() * 2) < 32736) 
+					window.setCwnd((short) (window.getCwnd() * 2));						
+				else 
+					window.setCwnd((short) 32736);
+			} else {
+				//CA Mode
+				if ((window.getCwnd() + size) < 32736)
+					window.setCwnd((short) (window.getCwnd() + size));
+				else 
+					window.setCwnd((short) 32736);
+			}
 		}
 	}
 	
+	//SERVER CAN BE SINGLE THREAD
 	static class ServerReceiveThread extends Thread {
 		
 		private DatagramSocket socket;
@@ -453,7 +469,7 @@ public class fcntcp {
 		
 		private int seq, recvAck;
 		private short rwnd, cwnd, ssthresh, lba, numUnacked;
-		private boolean[] acked;		
+		private ArrayList<PacketInfo> inFlight;
 		
 		public Window(int seq, int recvAck) {
 			this.seq = seq;
@@ -462,7 +478,19 @@ public class fcntcp {
 			this.cwnd = size;
 			this.rwnd = 32736;
 			this.lba = 0;
-			this.acked = new boolean[32736];
+			this.inFlight = new ArrayList<PacketInfo>();
+		}
+
+		public synchronized void addPacketInFlight(int seq) {
+			inFlight.add(new PacketInfo(seq));
+		}
+
+		public synchronized void removePacketInFlight(int seq) {
+			inFlight.remove(inFlight.indexOf(new PacketInfo(seq)));
+		}
+
+		public synchronized boolean allPacketsAcked() {
+			return inFlight.isEmpty();
 		}
 		
 		public synchronized int getSeq() {
@@ -544,8 +572,19 @@ public class fcntcp {
 		}
 		
 	}
-	
+
+	static class PacketInfo {
+		private int seq;
+		
+		public PacketInfo(int seq) {
+			this.seq = seq;
+		}
+		
+		public int getSeq() {
+			return this.seq;
+		}
+		
+	}
 }
 
-//System.out.println(segment.length);
 //System.out.println(javax.xml.bind.DatatypeConverter.printHexBinary(checksum));
