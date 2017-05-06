@@ -1,3 +1,7 @@
+/**
+ * @Author Zachary Migliorini zmm2962
+ */
+
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
@@ -17,19 +21,19 @@ import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.BitSet;
-import java.util.Random;
 
+/**
+ * Class which implements reliable data transfer, TCP-style wrapped around UDP datagrams.
+ */
 public class fcntcp {
 	
 	final static ByteOrder be = ByteOrder.BIG_ENDIAN;
 	final static int size = 1000;
 	
 	static ByteBuffer file;
-    	static byte[] fileArr;
+    static byte[] fileArr;
 	static SocketAddress addr;
 	static Window window;
-	
-	static Random rand = new Random();
 	
 	static DatagramSocket socket;
 	
@@ -88,7 +92,6 @@ public class fcntcp {
 			
 			window = new Window(2,1);
 
-			
 			byte[] checksumArr;
 			
 			//Send syn
@@ -104,8 +107,6 @@ public class fcntcp {
 			try { socket.receive(packet); }
 			catch (IOException e) { e.printStackTrace(); }
 	
-					
-			
 			byte[] ackHeader = new Header(1, 1, window.getRwnd(), (short)0, true, false, false).toByteArray();
 			checksumArr = ByteBuffer.allocate(2).putShort(getHeaderChecksum(ackHeader)).array();
 			ackHeader[16] = checksumArr[0];
@@ -115,8 +116,7 @@ public class fcntcp {
 			catch (IOException e) { e.printStackTrace(); }
 			
 			//Get ready to receive acks
-			new ClientReceiveThread(socket).start();
-			
+			new ClientReceiveThread(socket, verbose).start();
 			
 			int offset;
 			while(true) { 
@@ -145,10 +145,14 @@ public class fcntcp {
 					
 					packet = new DatagramPacket(data, data.length, addr);
 					
+					if (verbose) 
+						System.out.println("Sending: Seq #" + window.getSeq() + " Ack #" + window.getRecvAck() + " - # Bytes In Flight = " + window.getNumUnacked() + " out of window size " + window.getCwnd() + ". " + (fileArr.length - offset) + " bytes left in file.");
+					
 					try { socket.send(packet); }
 					catch (IOException e) { e.printStackTrace(); }
 					
 					window.incSeq(segment.length);
+					window.incRecvAck(1);
 					window.incNumUnacked((short) segment.length);
 					window.incSendBase(segment.length);
 
@@ -224,6 +228,9 @@ public class fcntcp {
 			try { socket.receive(packet); }
 			catch (IOException e) { e.printStackTrace(); }
 			
+			if (verbose) 
+				System.out.println("Connection established");
+			
 			int rcvBase = 2;
 			int lastAck = 2;
 			ArrayList<byte[]> serverFile = new ArrayList<byte[]>();
@@ -237,7 +244,6 @@ public class fcntcp {
 				Header segmentHeader = new Header(ByteBuffer.wrap(Arrays.copyOfRange(data, 0, 20)));
 				byte[] segment = Arrays.copyOfRange(data, 20, packet.getLength());
 				byte[] ackHeader = new byte[20];
-				
 				
 				if (validDataChecksum(data)) {
 					
@@ -257,22 +263,30 @@ public class fcntcp {
 						serverFile.add(segment);
 					} else {
 						//Out of order packet, send lastAck
+						if (verbose) 
+							System.out.println("Out of order packet #" + segmentHeader.getSeqNum());
 						ackHeader = new Header(window.getSeq(), lastAck, window.getRwnd(), (short)0, true, false, false).toByteArray();
 					}
 
 				} else {
 					//Invalid checksum, send lastAck
+					if (verbose)
+						System.out.println("Bit error detected in (probable) Seq #" + segmentHeader.getSeqNum());
 					ackHeader = new Header(window.getSeq(), lastAck, window.getRwnd(), (short)0, true, false, false).toByteArray(); 
 				}
 				
 				checksumArr = ByteBuffer.allocate(2).putShort(getHeaderChecksum(ackHeader)).array();
 				ackHeader[16] = checksumArr[0];
 				ackHeader[17] = checksumArr[1];
+				
 				packet = new DatagramPacket(ackHeader, 20, addr);
 				
 				try { socket.send(packet); 
 				} catch (IOException e) {e.printStackTrace();}
 			}
+			
+			if (verbose) 
+				System.out.println("Got Fin message from client, beginning shutdown procedure.\n");
 			
 			//Start fin sequence here
 			
@@ -313,14 +327,19 @@ public class fcntcp {
 		
 	}
 	
+	/**
+	 * Thread to handle all the ACK receiving for the client-side
+	 */
 	static class ClientReceiveThread extends Thread {
 		
 		private DatagramSocket socket;
 		private DatagramPacket packet;
+		private boolean verbose;
 		private int dupCount;
 		
-		public ClientReceiveThread(DatagramSocket socket) {
+		public ClientReceiveThread(DatagramSocket socket, boolean verbose) {
 			this.socket = socket;
+			this.verbose = verbose;
 			this.dupCount = 0;
 		}
 		
@@ -341,7 +360,10 @@ public class fcntcp {
 					catch (SocketTimeoutException ste) {
 						//On timeout, start sending again from last byte acked
 						timeout = true;
+						if (verbose) 
+							System.out.println("Timeout event at offset " + rcvBase + ". Bytes left in flight = " + window.getNumUnacked());
 						window.decSeq(window.getNumUnacked());
+						window.decRecvAck(window.getNumUnacked()/size);
 						window.setSendBase(rcvBase);
 						window.decNumUnacked(window.getNumUnacked());
 						break;
@@ -353,14 +375,22 @@ public class fcntcp {
 					if (validHeaderChecksum(packet.getData())) {
 						
 						if (header.getAckNum()-2 > rcvBase) {
-							window.decNumUnacked((short) ((header.getAckNum()-2) - rcvBase)); //Problem
+							if (verbose) 
+								System.out.println("Valid Ack #" + header.getAckNum() + " received.");
+							window.decNumUnacked((short) ((header.getAckNum()-2) - rcvBase));
 							rcvBase = header.getAckNum()-2;
 							window.setSendBase(rcvBase);
 						} else if (header.getAckNum()-2 == rcvBase) {
 							dupCount++;
+							if (verbose) 
+								System.out.println("Duplicate Ack #" + header.getAckNum() + " received");
 							if (dupCount == 2) {
 								//fast retransmit logic
+								if (verbose) {
+									System.out.println("Beginning fast retransmit");
+								}
 								window.decSeq(window.getNumUnacked());
+								window.decRecvAck(window.getNumUnacked()/size);
 								window.setSendBase(rcvBase);
 								window.decNumUnacked(window.getNumUnacked());
 								break;
@@ -369,7 +399,10 @@ public class fcntcp {
 						
 					} else {
 						//Corrupted ack
+						if (verbose) 
+							System.out.println("Corrupted (probable) Ack #" + header.getAckNum());
 						window.decSeq(window.getNumUnacked());
+						window.decRecvAck(window.getNumUnacked()/size);
 						window.setSendBase(rcvBase);
 						window.decNumUnacked(window.getNumUnacked());
 						break;
@@ -420,23 +453,41 @@ public class fcntcp {
 						break;
 					}
 				}
-
+				
+				if (verbose) 
+					System.out.println();
+				
 				synchronized (window) {
 					window.notify();
 					try {window.wait();}
 					catch (InterruptedException e) {e.printStackTrace();}
 				}
+				
+				if (verbose) 
+					System.out.println();
 			}
 		}
 	}
 		
-	
+	/**
+	 * Data structure to hold all the relevant info in the added header
+	 */
 	static class Header {
 		
 		private int seqNum, ackNum;
 		private short rwnd, checksum;
 		private boolean ack, syn, fin;
 		
+		/**
+		 * Build a header object from a list of values
+		 * @param seqNum the sequence number
+		 * @param ackNum the ack number
+		 * @param rwnd the receive window
+		 * @param checksum the checksum
+		 * @param ack is this an ack
+		 * @param syn is this a syn
+		 * @param fin is this a fin
+		 */
 		public Header(int seqNum, int ackNum, short rwnd, short checksum, boolean ack, boolean syn, boolean fin) {
 			this.seqNum = seqNum;
 			this.ackNum = ackNum;
@@ -447,6 +498,10 @@ public class fcntcp {
 			this.fin = fin;
 		}
 		
+		/**
+		 * Build a header object from a ByteBuffer
+		 * @param header 20 byte ByteBuffer
+		 */
 		public Header(ByteBuffer header) {
 			this.seqNum = header.getInt(4);
 			
@@ -465,6 +520,10 @@ public class fcntcp {
 		
 		}
 		
+		/**
+		 * Builds a byte array of a TCP header according to RFC 793, using the values in this object
+		 * @return the 20 byte array
+		 */
 		public byte[] toByteArray() {
 			byte[] ports = new byte[4];
 			
@@ -491,6 +550,13 @@ public class fcntcp {
 			return header.array();
 		}
 		
+		/**
+		 * Build the bytes containing the Ack, Syn, and Fin flags
+		 * @param ack is this an ack
+		 * @param syn is this a syn
+		 * @param fin is this a fin
+		 * @return two byte array
+		 */
 		private byte[] getFlagsBytes(boolean ack, boolean syn, boolean fin) {
 			short n = 0;
 			if (ack & syn & fin) {
@@ -571,6 +637,9 @@ public class fcntcp {
 		
 	}
 	
+	/**
+	 * Synchronized data structure which the client sender and receiver share to communicate and switch control
+	 */
 	static class Window {
 		
 		//Dyn array of latest segments/acks recvd by recv thread, then pass control to sender
@@ -579,6 +648,11 @@ public class fcntcp {
 		private int seq, recvAck, sendBase;
 		private short rwnd, cwnd, ssthresh, numUnacked;
 		
+		/**
+		 * Standard constructor
+		 * @param seq the initial sequence number to be sent
+		 * @param recvAck the initial ack number to be sent
+		 */
 		public Window(int seq, int recvAck) {
 			this.ss = false;
 			this.ca = false;
@@ -594,10 +668,16 @@ public class fcntcp {
 			return this.ss;
 		}
 		
+		/**
+		 * Checks if we are in slow start
+		 */
 		public void setSs(boolean val) {
 			this.ss = val;
 		}
 		
+		/**
+		 * Checks if we are in congestion avoidance
+		 */
 		public boolean ca() {
 			return this.ca;
 		}
@@ -614,6 +694,9 @@ public class fcntcp {
 			return this.ssthresh;
 		}
 		
+		/**
+		 * Checks if there are remaining packets in flight
+		 */
 		public synchronized boolean allPacketsAcked() {
 			return numUnacked == 0;
 		}
@@ -636,6 +719,10 @@ public class fcntcp {
 		
 		public synchronized void incRecvAck(int num) {
 			this.recvAck += num;
+		}
+		
+		public synchronized void decRecvAck(int num) {
+			this.recvAck -= num;
 		}
 		
 		public synchronized short getRwnd() {
@@ -677,21 +764,30 @@ public class fcntcp {
 		public synchronized void incSendBase(int num) {
 			this.sendBase += num;
 		}
-		
-		public synchronized void reportTimeout() {
-			this.ssthresh = ((short) (cwnd/2));
-			this.cwnd = ((short) size);
-		}
-		
+
+		/**
+		 * Checks if we should be operating according to slow start procedure
+		 * @return
+		 */
 		public synchronized boolean inSlowStart() {
 			return cwnd < ssthresh;
 		}
 		
+		/**
+		 * Checks if we still have room to send more data this round
+		 */
 		public synchronized boolean canSendMore() {
 			return numUnacked <= Math.min(cwnd-(size), rwnd-(size));
 		}
 		
 	}
+	
+	/**
+	 * Calculates a 16 bit one's complement checksum for a byte array split into two
+	 * @param header the array
+	 * @Param segment the data segment
+	 * @return the 16 bit checksum as a short
+	 */
 	
 	private static short getDataChecksum(byte[] header, byte[] segment) {
 		short checksum = 0;
@@ -706,6 +802,12 @@ public class fcntcp {
 		
 		return (short) ~checksum;
 	}
+	
+	/**
+	 * Calculates a 16 bit one's complement checksum for a byte array
+	 * @param header the array
+	 * @return the 16 bit checksum as a short
+	 */
 
 	private static short getHeaderChecksum(byte[] header) {
 		short checksum = 0;
@@ -715,6 +817,12 @@ public class fcntcp {
 		return (short)~checksum;
 	}
 	
+	/** 
+	 * Validates a header plus a block of data
+	 * @param data the byte[] to validate
+	 * @return t/f if there were no bit errors, or there were, respectively
+	 */
+	
 	private static boolean validDataChecksum(byte[] data) {
 		byte[] segment = Arrays.copyOfRange(data, 20, data.length);
 		byte[] header = Arrays.copyOfRange(data,  0, 20); 
@@ -723,6 +831,12 @@ public class fcntcp {
 		header[17] = 0;
 		return (getDataChecksum(header, segment) == checksum);
 	}
+	
+	/**
+	 * Tests if a header byte[] is valid for the checksum within
+	 * @param header the header
+	 * @return whether the header is valid (true) or bit errors occured (false)
+	 */
 	
 	private static boolean validHeaderChecksum(byte[] header) {
 		ByteBuffer buf = ByteBuffer.wrap(header);
@@ -737,6 +851,12 @@ public class fcntcp {
 		return ~check == orig;
 	}
 	
+	/**
+	 * Reads in a binary file located at path
+	 * @param path the location of the file
+	 * @return byte[] of the file
+	 */
+	
 	private static byte[] readBinary(String path) {
 		try {
 			Path p = Paths.get(path);
@@ -746,6 +866,11 @@ public class fcntcp {
 			return null;
 		} 
 	}
+	
+	/**
+	 * Prints a MD5 hash of the file
+	 * @param file the file to hash
+	 */
 	
 	private static void printDigest(byte[] file) {
 		MessageDigest md;
@@ -759,6 +884,13 @@ public class fcntcp {
 		System.out.println(javax.xml.bind.DatatypeConverter.printHexBinary(digest));
 	}	
 	
+	/**
+	 * Builds a socketAddress
+	 * @param serverAddress the server IP
+	 * @param port the port
+	 * @return the SocketAddress
+	 */
+	
 	private static SocketAddress getAddr(String serverAddress, int port) {
 		InetAddress inet;
 		SocketAddress addr = null;
@@ -771,6 +903,11 @@ public class fcntcp {
 		return addr;
 	}
 	
+	/**
+	 * Builds a socket with no port
+	 * @return the socket
+	 */
+	
 	private static DatagramSocket getSocket() {
 		DatagramSocket socket = null;
 		try {
@@ -780,6 +917,12 @@ public class fcntcp {
 		}
 		return socket;
 	}
+	
+	/**
+	 * Builds a socket
+	 * @param port the port
+	 * @return the socket
+	 */
 	
 	private static DatagramSocket getSocket(int port) {
 		DatagramSocket socket = null;
