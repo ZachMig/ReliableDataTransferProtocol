@@ -17,8 +17,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.BitSet;
-import java.util.HashMap;
-import java.util.Iterator;
+import java.util.Random;
 
 public class fcntcp {
 	
@@ -26,13 +25,15 @@ public class fcntcp {
 	final static int size = 1000;
 	
 	static ByteBuffer file;
-    static byte[] fileArr;
+    	static byte[] fileArr;
 	static SocketAddress addr;
 	static Window window;
 	
+	static Random rand = new Random();
+	
 	static DatagramSocket socket;
 	
-	public static void main(String[] args) throws Exception { //Remove this later
+	public static void main(String[] args) { 
 		
 		boolean client = false, verbose = false;
 		String path= "", serverAddress = "";
@@ -78,55 +79,57 @@ public class fcntcp {
 		if (client) {
 			
 			socket = getSocket();
-			socket.setSoTimeout((int) timeout);
+			try {socket.setSoTimeout((int) timeout); }
+			catch (SocketException e) { e.printStackTrace(); }
 			addr = getAddr(serverAddress, port);
 			DatagramPacket packet;
 			
 			fileArr = readBinary(path);
-			System.out.println(fileArr.length);
 			
 			window = new Window(2,1);
+
 			
-			//DO CHECKSUM FOR SYN/ACK STUFF
+			byte[] checksumArr;
 			
 			//Send syn
 			byte[] synHeader = new Header(0, 0, window.getRwnd(), (short)0, false, true, false).toByteArray();
-			byte[] checksumArr = ByteBuffer.allocate(2).putShort(getHeaderChecksum(synHeader)).array();
+			checksumArr = ByteBuffer.allocate(2).putShort(getHeaderChecksum(synHeader)).array();
 			synHeader[16] = checksumArr[0];
 			synHeader[17] = checksumArr[1];
 			packet = new DatagramPacket(synHeader, 20, addr);
-			socket.send(packet);
+			try { socket.send(packet);
+			} catch (IOException e) { e.printStackTrace(); }
 			
-			//Receive synack
 			packet.setData(new byte[20]);
-			socket.receive(packet);
-
-			//Get ready to receive acks
-			new ClientReceiveThread(socket).start();
+			try { socket.receive(packet); }
+			catch (IOException e) { e.printStackTrace(); }
+	
+					
 			
-			//Send ack
 			byte[] ackHeader = new Header(1, 1, window.getRwnd(), (short)0, true, false, false).toByteArray();
-			checksumArr = ByteBuffer.allocate(2).putShort(getHeaderChecksum(synHeader)).array();
+			checksumArr = ByteBuffer.allocate(2).putShort(getHeaderChecksum(ackHeader)).array();
 			ackHeader[16] = checksumArr[0];
 			ackHeader[17] = checksumArr[1];
 			packet = new DatagramPacket(ackHeader, 20, addr);
-			socket.send(packet);
+			try { socket.send(packet); }
+			catch (IOException e) { e.printStackTrace(); }
 			
-			System.out.println("Connection Established");
-			int offset;;
-			int numPackets = 0;
-			int round = 0;
-			while(true) { //for (int offset = 0; offset < fileArr.length; offset+=size) {
+			//Get ready to receive acks
+			new ClientReceiveThread(socket).start();
+			
+			
+			int offset;
+			while(true) { 
 				
 				if (window.canSendMore()) { 
 					
 					offset = window.getSendBase();
-					System.out.println("Offset: " + offset);
 					
 					if (offset >= fileArr.length) {
 						synchronized (window) {
 							window.notify();
-							window.wait();
+							try { window.wait(); }
+							catch (InterruptedException e) { e.printStackTrace(); }
 						}
 						break;
 					}
@@ -142,52 +145,56 @@ public class fcntcp {
 					
 					packet = new DatagramPacket(data, data.length, addr);
 					
-					System.out.println("Sending Seq#" + window.getSeq());
-					socket.send(packet);
-					numPackets++;
+					try { socket.send(packet); }
+					catch (IOException e) { e.printStackTrace(); }
 					
 					window.incSeq(segment.length);
 					window.incNumUnacked((short) segment.length);
 					window.incSendBase(segment.length);
 
 				} else {
-					round++;
 					synchronized (window) {
-						System.out.println("Sent " + numPackets + " packets.");
-						System.out.println("Leaving numUnAcked = " + window.getNumUnacked());
-						System.out.println("Switching control to rcv");
 						window.notify();
-						System.out.println("Sender waiting");
-						System.out.println();
-						window.wait();
-						System.out.println("Sender woke up");
+						try { window.wait(); }
+						catch (InterruptedException e) { e.printStackTrace(); }
 					}
 				}
 			}
 			
-			System.out.println(fileArr.length);
 			printDigest(fileArr);
 			
-			System.out.println("Starting to close");
 			
+			//Send Fin
 			byte[] finHeader = new Header(window.getSeq(), window.getRecvAck(), window.getRwnd(), (short)0, false, false, true).toByteArray();
 			byte[] checksum = ByteBuffer.allocate(2).putShort(getHeaderChecksum(finHeader)).array();
 			finHeader[16] = checksum[0];
 			finHeader[17] = checksum[1];
 			
+			
 			packet = new DatagramPacket(finHeader, 20, addr);
-			socket.send(packet);
-			System.out.println("sent fin");
+			try { socket.send(packet); }
+			catch (IOException e) { e.printStackTrace(); }
 			
+			//Get Ack
 			packet.setData(new byte[20]);
-			socket.receive(packet);
+			try { socket.receive(packet); }
+			catch (IOException e) { e.printStackTrace(); }
 			
-			window.setFinished(true);
+			//Get fin
+			packet.setData(new byte[20]);
+			try { socket.receive(packet); }
+			catch (IOException e) { e.printStackTrace(); }
 			
-//			synchronized (window) {
-//				//Wake up rcv to see window.isFinished() & exit
-//				window.notify();
-//			}
+			//Send Ack
+			window.incSeq(1);
+			ackHeader = new Header(window.getSeq(), window.getRecvAck(), window.getRwnd(), (short)0, false, false, true).toByteArray();
+			checksum = ByteBuffer.allocate(2).putShort(getHeaderChecksum(ackHeader)).array();
+			ackHeader[16] = checksum[0];
+			ackHeader[17] = checksum[1];
+			
+			packet = new DatagramPacket(ackHeader, 20, addr);
+			try { socket.send(packet); }
+			catch (IOException e) { e.printStackTrace(); }
 			
 			
 //Server	
@@ -195,40 +202,38 @@ public class fcntcp {
 			socket = getSocket(port);
 			DatagramPacket packet = new DatagramPacket(new byte[20], 20);
 			
-			//Get syn
-			socket.receive(packet);
+			//Get Syn
+			try { socket.receive(packet); }
+			catch (IOException e) { e.printStackTrace(); }
 			addr = packet.getSocketAddress();
 
 			window = new Window(1, 2);
 
 			
-			//send synack
-			byte[] synackHeader = new Header(0, 1, window.getRwnd(), ByteBuffer.wrap(new byte[] {1,1}).getShort(), true, true, false).toByteArray(); //Fix checksum
+			//send SynAck
+			byte[] synackHeader = new Header(0, 1, window.getRwnd(), (short)0, true, true, false).toByteArray(); 
+			byte[] checksumArr = ByteBuffer.allocate(2).putShort(getHeaderChecksum(synackHeader)).array();
+			synackHeader[16] = checksumArr[0];
+			synackHeader[17] = checksumArr[1];
 			packet = new DatagramPacket(synackHeader, 20, addr);
-			socket.send(packet);
-			System.out.println("sending packet 2");
+			try { socket.send(packet); }
+			catch (IOException e) { e.printStackTrace(); }
 			
-			//get ack
+			//get Ack
 			packet = new DatagramPacket(new byte[20], 20);
-			socket.receive(packet);
+			try { socket.receive(packet); }
+			catch (IOException e) { e.printStackTrace(); }
 			
-			System.out.println("Connection Established");
-			
-			int numPackets = 0;
 			int rcvBase = 2;
 			int lastAck = 2;
 			ArrayList<byte[]> serverFile = new ArrayList<byte[]>();
 			for (;;) {
 				packet = new DatagramPacket(new byte[size+20], size+20);
 				
-				System.out.println("Waiting to rcv");
 				try { socket.receive(packet);
 				} catch (IOException e) { e.printStackTrace();}
-				numPackets++;
-				System.out.println( numPackets + " packets received so far.");
 				
 				byte[] data = packet.getData();
-				System.out.println("Len: " + packet.getLength());
 				Header segmentHeader = new Header(ByteBuffer.wrap(Arrays.copyOfRange(data, 0, 20)));
 				byte[] segment = Arrays.copyOfRange(data, 20, packet.getLength());
 				byte[] ackHeader = new byte[20];
@@ -237,15 +242,13 @@ public class fcntcp {
 				if (validDataChecksum(data)) {
 					
 					if (segmentHeader.isFin()) {
-						//Start fin sequence
+						//Start Fin sequence
 						break;
 					}
 					
-					System.out.println("Received Seq Num: " + segmentHeader.getSeqNum());
-					
 					//If we have received the expected next packet
 					if (segmentHeader.getSeqNum() == rcvBase) {
-						//Send next ack
+						//Send next Ack
 						ackHeader = new Header(window.getSeq(), rcvBase+segment.length, window.getRwnd(), (short)0, true, false, false).toByteArray(); 
 						
 						window.incSeq(1);
@@ -254,34 +257,56 @@ public class fcntcp {
 						serverFile.add(segment);
 					} else {
 						//Out of order packet, send lastAck
-						ackHeader = new Header(window.getSeq(), lastAck, window.getRwnd(), (short)0, true, false, false).toByteArray(); 
-						System.out.println("Out of order packet, send Seq: " + window.getSeq() + ", Ack#: " + lastAck);
+						ackHeader = new Header(window.getSeq(), lastAck, window.getRwnd(), (short)0, true, false, false).toByteArray();
 					}
 
 				} else {
 					//Invalid checksum, send lastAck
 					ackHeader = new Header(window.getSeq(), lastAck, window.getRwnd(), (short)0, true, false, false).toByteArray(); 
-					System.out.println("Invalid checksum, send Seq: " + window.getSeq() + ", Ack#: " + lastAck);
 				}
 				
-				byte[] checksumArr = ByteBuffer.allocate(2).putShort(getHeaderChecksum(ackHeader)).array();
+				checksumArr = ByteBuffer.allocate(2).putShort(getHeaderChecksum(ackHeader)).array();
 				ackHeader[16] = checksumArr[0];
 				ackHeader[17] = checksumArr[1];
 				packet = new DatagramPacket(ackHeader, 20, addr);
 				
 				try { socket.send(packet); 
 				} catch (IOException e) {e.printStackTrace();}
-				System.out.println();
 			}
 			
-			System.out.println("got fin");
 			//Start fin sequence here
+			
+			byte[] ackHeader = new Header(window.getSeq(), ++rcvBase, window.getRwnd(), (short)0, true, false, false).toByteArray();
+			checksumArr = ByteBuffer.allocate(2).putShort(getHeaderChecksum(ackHeader)).array();
+			ackHeader[16] = checksumArr[0];
+			ackHeader[17] = checksumArr[1];
+			packet = new DatagramPacket(ackHeader, 20, addr);
+			
+			//Respond to fin with Ack
+			try { socket.send(packet);
+			} catch (IOException e) { e.printStackTrace();}
+			
+			window.incSeq(1);
+			
+			//Send fin
+			byte[] finHeader = new Header(window.getSeq(), ++rcvBase, window.getRwnd(), (short)0, false, false, true).toByteArray();
+			checksumArr = ByteBuffer.allocate(2).putShort(getHeaderChecksum(finHeader)).array();
+			finHeader[16] = checksumArr[0];
+			finHeader[17] = checksumArr[1];
+			packet = new DatagramPacket(finHeader, 20, addr);
+			
+			try { socket.send(packet);
+			} catch (IOException e) { e.printStackTrace();}
+			
+			//Get last Ack
+			packet = new DatagramPacket(new byte[20], 20);
+			try { socket.receive(packet);
+			} catch (IOException e) { e.printStackTrace();}
 			
 			ByteBuffer fileBuf = ByteBuffer.allocate( ((serverFile.size()-1) * size) + serverFile.get(serverFile.size()-1).length);
 			for (byte[] bytes : serverFile) {
 				fileBuf.put(bytes);
 			}
-			System.out.println(fileBuf.capacity());
 			printDigest(fileBuf.array());
 			
 		}
@@ -301,39 +326,29 @@ public class fcntcp {
 		
 		@Override
 		public void run() {
-			System.out.println("starting ClientReceiveThread");
 			boolean timeout = false;
-			int errorCount = 0;
 			int rcvBase = 0;
-			while (rcvBase < fileArr.length-1) { //if window.isFinished(), exit
+			while (rcvBase < fileArr.length-1) {
 				for (;;) {
-					System.out.println("rcvBase: " + rcvBase);
-					System.out.println("NumUnacked: " + window.getNumUnacked());
 					
 					if (window.allPacketsAcked() && window.getSeq() != 2) {
-						System.out.println("break");
 						break;
 					}
 					
 					packet = new DatagramPacket(new byte[20], 20);
 					
-					try {
-					socket.receive(packet);}
-					
+					try {socket.receive(packet);}
 					catch (SocketTimeoutException ste) {
 						//On timeout, start sending again from last byte acked
 						timeout = true;
 						window.decSeq(window.getNumUnacked());
 						window.setSendBase(rcvBase);
 						window.decNumUnacked(window.getNumUnacked());
-						System.out.println("Timed out");
-						errorCount++;
 						break;
 					}
 					catch (IOException e) {e.printStackTrace();}
 					
 					Header header = new Header(ByteBuffer.wrap(packet.getData()));
-					System.out.println("Received Ack #" + header.getAckNum());
 
 					if (validHeaderChecksum(packet.getData())) {
 						
@@ -345,7 +360,6 @@ public class fcntcp {
 							dupCount++;
 							if (dupCount == 2) {
 								//fast retransmit logic
-								errorCount++;
 								window.decSeq(window.getNumUnacked());
 								window.setSendBase(rcvBase);
 								window.decNumUnacked(window.getNumUnacked());
@@ -353,17 +367,16 @@ public class fcntcp {
 							}
 						}
 						
-						//do something else probably
 					} else {
-						//corrupted ack
-						System.out.println("corrupt ACK");
-						//set numUnacked == 0? and set sendBase = rcvBase?
-						errorCount++;
+						//Corrupted ack
+						window.decSeq(window.getNumUnacked());
+						window.setSendBase(rcvBase);
+						window.decNumUnacked(window.getNumUnacked());
+						break;
 					}
 					
 				}
 				
-				System.out.println(dupCount + " duplicates");
 				
 				if (dupCount == 3) {
 					window.setSsThresh((short)(window.getCwnd()/2));
@@ -373,16 +386,27 @@ public class fcntcp {
 					window.setSsThresh((short) (window.getCwnd()/2));
 					window.setCwnd((short) size);
 					timeout = false;
-				} else {
+				} else { 
+//Congestion control logic
 					//Adjust CWND
 					if (window.inSlowStart()) { //Maybe move this SS into the for
 						//SS Mode
+						if (!window.ss) {
+							System.out.println("Entering slow-start");
+							window.setSs(true);
+							window.setCa(false);
+						}
 						if ((window.getCwnd() * 2) < 32736) 
 							window.setCwnd((short) (window.getCwnd() * 2));						
 						else 
 							window.setCwnd((short) 32736);
 					} else {
 						//CA Mode
+						if (!window.ca) {
+							System.out.println("Entering congestion-avoidance");
+							window.setSs(false);
+							window.setCa(true);
+						}
 						if ((window.getCwnd() + size) < 32736)
 							window.setCwnd((short) (window.getCwnd() + size));
 						else 
@@ -390,18 +414,19 @@ public class fcntcp {
 					}
 				}
 				
+				if (rcvBase == fileArr.length) {
+					synchronized (window) {
+						window.notify();
+						break;
+					}
+				}
 
-				System.out.println(errorCount);
 				synchronized (window) {
-					System.out.println("Switching control to send");
-					System.out.println();
 					window.notify();
 					try {window.wait();}
 					catch (InterruptedException e) {e.printStackTrace();}
 				}
 			}
-			System.out.println("done rcv");
-			
 		}
 	}
 		
@@ -423,10 +448,8 @@ public class fcntcp {
 		}
 		
 		public Header(ByteBuffer header) {
-			byte[] seqBuf = new byte[4];
 			this.seqNum = header.getInt(4);
 			
-			byte[] ackBuf = new byte[4];
 			this.ackNum = header.getInt(8);
 			
 			byte[] flagsBuf = new byte[] {header.get(13)};
@@ -435,10 +458,8 @@ public class fcntcp {
 			this.syn = bs.get(1);
 			this.ack = bs.get(4);
 			
-			byte[] rwndBuf = new byte[2];
 			this.rwnd = header.getShort(14);
 			
-			byte[] checksumBuf = new byte[2];
 			this.checksum = header.getShort(16);
 			
 		
@@ -554,24 +575,37 @@ public class fcntcp {
 		
 		//Dyn array of latest segments/acks recvd by recv thread, then pass control to sender
 		
-		private boolean finished;
+		private boolean ca, ss;
 		private int seq, recvAck, sendBase;
 		private short rwnd, cwnd, ssthresh, numUnacked;
-		private ArrayList<Packet> inFlight;
-		private ArrayList<Packet> toResend;
 		
 		public Window(int seq, int recvAck) {
-			this.finished = false;
+			this.ss = false;
+			this.ca = false;
 			this.seq = seq;
 			this.recvAck = recvAck;
 			this.ssthresh = 32736;
 			this.cwnd = size;
 			this.rwnd = 32736;
 			this.sendBase = 0;
-			this.inFlight = new ArrayList<Packet>();
-			this.toResend = new ArrayList<Packet>();
 		}
 
+		public boolean ss() {
+			return this.ss;
+		}
+		
+		public void setSs(boolean val) {
+			this.ss = val;
+		}
+		
+		public boolean ca() {
+			return this.ca;
+		}
+		
+		public void setCa(boolean val) {
+			this.ca = val;
+		}
+		
 		public void setSsThresh(short num) {
 			this.ssthresh = num;
 		}
@@ -580,38 +614,7 @@ public class fcntcp {
 			return this.ssthresh;
 		}
 		
-		public synchronized boolean isFinished() {
-			return this.finished;
-		}
-		
-		public synchronized void setFinished(boolean val) {
-			this.finished = val;
-		}
-		
-		public synchronized void addPacketInFlight(Packet p) {
-			inFlight.add(p);
-		}
-
-		public synchronized void removePacketInFlight(int seq) {
-			inFlight.remove(inFlight.indexOf(new Packet(seq, new byte[0])));
-		}
-
-		public synchronized void addPacketToResend(Packet p) {
-			this.toResend.add(p);
-		}
-		
-		public synchronized Packet nextPacketToResend() {
-			Packet ret = toResend.get(0);
-			toResend.remove(0);
-			return ret;
-		}
-		
-		public synchronized boolean packetsToResend() {
-			return !toResend.isEmpty();
-		}
-		
 		public synchronized boolean allPacketsAcked() {
-			System.out.println("UNACKED #" + numUnacked);
 			return numUnacked == 0;
 		}
 		
@@ -680,11 +683,6 @@ public class fcntcp {
 			this.cwnd = ((short) size);
 		}
 		
-		public synchronized void reportTripleAck() {
-			this.ssthresh = ((short) ((cwnd/2) + size));
-			this.cwnd = ((short) (cwnd/2));
-		}
-		
 		public synchronized boolean inSlowStart() {
 			return cwnd < ssthresh;
 		}
@@ -693,43 +691,6 @@ public class fcntcp {
 			return numUnacked <= Math.min(cwnd-(size), rwnd-(size));
 		}
 		
-		public synchronized void printInFlight() {
-			System.out.println(inFlight);
-		}
-		
-		public synchronized ArrayList<Packet> getInFlight() {
-			return this.inFlight;
-		}
-		
-	}
-	
-	static class Packet {
-		private int ackNum;
-		private byte[] data;
-		
-		public Packet(int ackNum, byte[] data) {
-			this.ackNum = ackNum;
-			this.data = data;
-		}
-		
-		public int getAckNum() {
-			return this.ackNum;
-		}
-		
-		public byte[] getData() {
-			return this.data;
-		}
-		
-		@Override
-		public String toString() {
-			return String.valueOf(this.ackNum);
-		}
-	
-		@Override
-		public boolean equals(Object o) {
-			Packet p = (Packet) o;
-			return this.ackNum == p.getAckNum();
-		}
 	}
 	
 	private static short getDataChecksum(byte[] header, byte[] segment) {
@@ -770,7 +731,7 @@ public class fcntcp {
 		
 		short check = 0;
 		for (int i = 0; i < 16; i+=2) {
-			check += buf.getShort(i);//can probably do this relative?
+			check += buf.getShort(i);
 		}
 		
 		return ~check == orig;
@@ -781,7 +742,6 @@ public class fcntcp {
 			Path p = Paths.get(path);
 			return Files.readAllBytes(p);
 		} catch (IOException e) {
-			System.err.println("Caught " + e.getClass());
 			e.printStackTrace();
 			return null;
 		} 
@@ -794,7 +754,6 @@ public class fcntcp {
 			md = MessageDigest.getInstance("MD5");
 			 digest = md.digest(file);
 		} catch (NoSuchAlgorithmException e) {
-			System.err.println("Caught " + e.getClass());
 			e.printStackTrace();
 		}
 		System.out.println(javax.xml.bind.DatatypeConverter.printHexBinary(digest));
@@ -833,5 +792,3 @@ public class fcntcp {
 	}
 	
 }
-
-//System.out.println(javax.xml.bind.DatatypeConverter.printHexBinary(checksum));
