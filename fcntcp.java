@@ -1,5 +1,5 @@
 /**
- * @Author Zachary Migliorini zmm2962
+ * @Author Zachary Migliorini
  */
 
 import java.io.IOException;
